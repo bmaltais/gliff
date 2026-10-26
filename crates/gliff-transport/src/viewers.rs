@@ -64,8 +64,20 @@ pub fn register(runtime: &Path, machine: &str, output: &str) -> Option<Registrat
 fn register_in(dir: &Path, pid: u32, machine: &str, output: &str) -> io::Result<Registration> {
     fs::create_dir_all(dir)?;
     let path = dir.join(pid.to_string());
-    fs::write(&path, format!("{machine}\n{output}\n"))?;
+    let started =
+        start_time(pid).ok_or_else(|| io::Error::other("no start time for the process"))?;
+    fs::write(&path, format!("{machine}\n{output}\n{started}\n"))?;
     Ok(Registration { path })
+}
+
+/// When process `pid` started, in clock ticks since boot (field 22 of
+/// `/proc/<pid>/stat`). With the pid it names one process, so a reused pid
+/// does not pass for the server that wrote a record.
+fn start_time(pid: u32) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command name (field 2) may hold spaces and parentheses; skip past its end.
+    let rest = &stat[stat.rfind(')')? + 1..];
+    rest.split_whitespace().nth(19)?.parse().ok()
 }
 
 /// The machines viewing this one right now.
@@ -87,17 +99,23 @@ fn entries_in(dir: &Path) -> Vec<(u32, Viewer)> {
         let pid = entry
             .file_name()
             .to_str()
-            .and_then(|pid| pid.parse::<u32>().ok())
-            .filter(|pid| Path::new("/proc").join(pid.to_string()).exists());
-        let Some(pid) = pid else {
-            let _ = fs::remove_file(&path);
-            continue;
-        };
+            .and_then(|pid| pid.parse::<u32>().ok());
         let Ok(text) = fs::read_to_string(&path) else {
             continue;
         };
         let mut lines = text.lines();
-        if let (Some(machine), Some(output)) = (lines.next(), lines.next()) {
+        let (machine, output, started) = (lines.next(), lines.next(), lines.next());
+        // Alive means the same process still runs under the pid, not just that
+        // the pid is taken.
+        let pid = pid.filter(|pid| {
+            let started = started.and_then(|s| s.parse::<u64>().ok());
+            started.is_some() && started == start_time(*pid)
+        });
+        let Some(pid) = pid else {
+            let _ = fs::remove_file(&path);
+            continue;
+        };
+        if let (Some(machine), Some(output)) = (machine, output) {
             found.push((
                 pid,
                 Viewer {
@@ -144,5 +162,16 @@ mod tests {
         fs::write(&ghost, "m\nDP-1\n").unwrap();
         assert!(viewers_in(dir.path()).is_empty());
         assert!(!ghost.exists());
+    }
+
+    #[test]
+    fn a_reused_pid_is_not_the_original_server() {
+        let dir = tempfile::tempdir().unwrap();
+        // A live pid recorded with another process's start time.
+        let ours = dir.path().join(std::process::id().to_string());
+        let started = start_time(std::process::id()).unwrap();
+        fs::write(&ours, format!("m\nDP-1\n{}\n", started + 1)).unwrap();
+        assert!(viewers_in(dir.path()).is_empty());
+        assert!(!ours.exists());
     }
 }

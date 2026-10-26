@@ -31,11 +31,22 @@ pub fn follow(window: &impl IsA<gtk::Native>) -> Placement {
                 tx.send_replace(monitor.connector().map(Into::into));
             }
         };
-        if let Some(monitor) = gdk::Display::default().and_then(|d| d.monitor_at_surface(&surface))
-        {
-            report(&monitor);
-        }
+        let settle = {
+            let report = report.clone();
+            let surface = surface.clone();
+            move || {
+                if let Some(monitor) =
+                    gdk::Display::default().and_then(|d| d.monitor_at_surface(&surface))
+                {
+                    report(&monitor);
+                }
+            }
+        };
+        settle();
         surface.connect_enter_monitor(move |_, monitor| report(monitor));
+        // Leaving a monitor the window overlapped puts it back on the one it
+        // still touches, which an enter alone would not report.
+        surface.connect_leave_monitor(move |_, _| settle());
     };
     match native.surface() {
         Some(_) => watch_surface(native),
