@@ -66,7 +66,11 @@ fn register_in(dir: &Path, pid: u32, machine: &str, output: &str) -> io::Result<
     let path = dir.join(pid.to_string());
     let started =
         start_time(pid).ok_or_else(|| io::Error::other("no start time for the process"))?;
-    fs::write(&path, format!("{machine}\n{output}\n{started}\n"))?;
+    // Written under a name the readers skip, then renamed, so a reader never
+    // sees a record that is still empty.
+    let partial = dir.join(format!(".{pid}"));
+    fs::write(&partial, format!("{machine}\n{output}\n{started}\n"))?;
+    fs::rename(&partial, &path)?;
     Ok(Registration { path })
 }
 
@@ -96,6 +100,9 @@ fn entries_in(dir: &Path) -> Vec<(u32, Viewer)> {
     let mut found = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
         let pid = entry
             .file_name()
             .to_str()
@@ -162,6 +169,15 @@ mod tests {
         fs::write(&ghost, "m\nDP-1\n").unwrap();
         assert!(viewers_in(dir.path()).is_empty());
         assert!(!ghost.exists());
+    }
+
+    #[test]
+    fn a_record_in_the_making_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let partial = dir.path().join(format!(".{}", std::process::id()));
+        fs::write(&partial, "").unwrap();
+        assert!(viewers_in(dir.path()).is_empty());
+        assert!(partial.exists());
     }
 
     #[test]
