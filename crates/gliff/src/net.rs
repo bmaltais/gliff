@@ -510,17 +510,24 @@ where
     tracing::debug!(bytes = first_keymap.len(), "sending keymap");
     let _ = tokio::time::timeout(FIRST_PLACEMENT_WAIT, placement.wait_for(Option::is_some)).await;
     let origin = viewers::machine_id().map(|machine| {
-        Box::new(Origin {
-            machine,
-            window_output: placement.borrow().clone(),
-            // Forcing lists no viewers, so the server cannot see a loop; it
-            // still learns who connected, so the way back stays guarded.
-            viewers: hypr_ipc::runtime_dir()
+        let window_output = placement.borrow().clone();
+        // Only the viewers of the output this window is on can make a loop, so
+        // those are all a server learns of; none while the output is unknown.
+        // Forcing lists none, so the server cannot see a loop; it still learns
+        // who connected, so the way back stays guarded.
+        let viewers = match (&window_output, force) {
+            (Some(output), false) => hypr_ipc::runtime_dir()
                 .map(|dir| viewers::viewers(&dir))
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|_| !force)
+                .filter(|v| &v.output == output)
                 .collect(),
+            _ => Vec::new(),
+        };
+        Box::new(Origin {
+            machine,
+            window_output,
+            viewers,
         })
     });
     tracing::debug!(

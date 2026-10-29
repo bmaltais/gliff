@@ -11,29 +11,45 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use gliff_proto::Viewer;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 
-/// An opaque identity of this machine: a hash of its machine id, so the id
-/// itself never leaves the machine. `None` when the machine has none.
+/// An opaque identity of this machine, for the loop guard. machine-id(5) says
+/// the id must not appear on the network, so this is the construction of
+/// `sd_id128_get_app_specific(3)`: HMAC-SHA256 of a fixed gliff application id,
+/// keyed by the machine id, truncated to 128 bits and sent as hex. `None` when
+/// the machine has no id.
 pub fn machine_id() -> Option<String> {
     ["/etc/machine-id", "/var/lib/dbus/machine-id"]
         .iter()
         .filter_map(|p| fs::read_to_string(p).ok())
         .map(|id| id.trim().to_owned())
         .find(|id| !id.is_empty())
-        .map(|id| hash_id(&id))
+        .map(|id| app_specific_id(&id))
 }
 
-/// FNV-1a over the id, run under two salts to fill 128 bits. It is not a
-/// secret-keeping hash; it only keeps the raw machine id off the wire.
-fn hash_id(id: &str) -> String {
-    let run = |salt: &str| {
-        salt.bytes()
-            .chain(id.bytes())
-            .fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
-                (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
-            })
-    };
-    format!("{:016x}{:016x}", run("gliff:a:"), run("gliff:b:"))
+/// Fixed key material naming this use of the machine id.
+const APP_ID: &[u8] = b"gliff loop guard machine identity v1";
+
+fn app_specific_id(id: &str) -> String {
+    let mut mac = Hmac::<Sha256>::new_from_slice(&machine_id_bytes(id))
+        .expect("HMAC accepts a key of any length");
+    mac.update(APP_ID);
+    mac.finalize().into_bytes()[..16]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The 16 bytes of a hex machine id; the text itself for anything else.
+fn machine_id_bytes(id: &str) -> Vec<u8> {
+    let hex = |i: usize| u8::from_str_radix(id.get(i..i + 2)?, 16).ok();
+    if id.len() == 32 {
+        if let Some(bytes) = (0..16).map(|i| hex(i * 2)).collect() {
+            return bytes;
+        }
+    }
+    id.as_bytes().to_vec()
 }
 
 /// The directory under the user's runtime directory (`hypr_ipc::runtime_dir`,
@@ -140,10 +156,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hashed_ids_are_stable_and_distinct() {
-        assert_eq!(hash_id("abc"), hash_id("abc"));
-        assert_ne!(hash_id("abc"), hash_id("abd"));
-        assert_eq!(hash_id("abc").len(), 32);
+    fn app_specific_ids_are_stable_and_distinct() {
+        let (a, b) = (
+            "0123456789abcdef0123456789abcdef",
+            "0123456789abcdef0123456789abcdee",
+        );
+        assert_eq!(app_specific_id(a), app_specific_id(a));
+        assert_ne!(app_specific_id(a), app_specific_id(b));
+        assert_eq!(app_specific_id(a).len(), 32);
+        assert!(!app_specific_id(a).contains(a));
+        // Not a hex id: keyed by its text instead of failing.
+        assert_ne!(app_specific_id("abc"), app_specific_id("abd"));
+    }
+
+    #[test]
+    fn a_hex_machine_id_keys_with_its_16_bytes() {
+        assert_eq!(
+            machine_id_bytes("000102030405060708090a0b0c0d0e0f"),
+            (0u8..16).collect::<Vec<_>>()
+        );
     }
 
     #[test]
